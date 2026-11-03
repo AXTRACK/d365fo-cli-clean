@@ -1002,6 +1002,43 @@ public sealed class ObjectModifyEngineTests : IDisposable
     }
 
     [Fact]
+    public void Add_form_control_preserves_existing_sibling_and_nested_control()
+    {
+        const string xml =
+            "<AxForm><Name>FmVehicleList</Name><Design><Controls>" +
+            "<AxFormControlGroup><Name>Grid</Name><Controls>" +
+            "<AxFormControlString><Name>Existing</Name><Label>Original label</Label></AxFormControlString>" +
+            "<AxFormControlGroup><Name>Nested</Name><Controls>" +
+            "<AxFormControlString><Name>NestedExisting</Name></AxFormControlString>" +
+            "</Controls></AxFormControlGroup>" +
+            "</Controls></AxFormControlGroup></Controls></Design></AxForm>";
+        var capture = new BridgeCapture(xml);
+        using var harness = FakeBridge.Create(capture.Respond);
+
+        var result = ObjectModifyEngine.ModifyCore(new ObjectModifyEngine.ModifyRequest
+        {
+            Operation = ObjectModifyEngine.Operation.AddControl,
+            Kind = "form",
+            ObjectName = "FmVehicleList",
+            Member = "NewControl",
+            Type = "String",
+            Parent = "Grid",
+            Model = "FleetCustom",
+        }, _repo, harness.Client, _journalDb);
+
+        Assert.True(result.Ok, result.Error?.Message);
+        Assert.Equal(1, capture.WriteCount);
+        var written = XDocument.Parse((string)capture.WriteArgs!["xml"]!);
+        var names = written.Descendants("Name").Select(e => e.Value).ToArray();
+        Assert.Contains("Existing", names);
+        Assert.Contains("NestedExisting", names);
+        Assert.Contains("NewControl", names);
+        Assert.Equal("Original label", written.Descendants()
+            .Single(e => e.Element("Name")?.Value == "Existing").Element("Label")?.Value);
+        Assert.Equal(1, written.Descendants("Name").Count(e => e.Value == "NewControl"));
+    }
+
+    [Fact]
     public void Add_control_reports_an_unknown_parent_instead_of_writing_at_the_root()
     {
         var capture = new BridgeCapture(FormXml);
