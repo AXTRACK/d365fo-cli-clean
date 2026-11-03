@@ -832,6 +832,47 @@ public sealed class ObjectModifyEngineTests : IDisposable
     }
 
     [Fact]
+    public void Removing_form_group_cleans_up_deleted_nested_control_methods_only()
+    {
+        const string siblingSource = "\n    public boolean modified() { return true; }\n";
+        var xml = NestedFormXml.Replace("<Design>",
+            "<SourceCode><DataControls>" +
+            "<Control><Name>NestedExisting</Name><Methods><Method><Name>modified</Name>" +
+            "<Source><![CDATA[\n    public boolean modified() { return false; }\n]]></Source>" +
+            "</Method></Methods></Control>" +
+            "<Control><Name>Existing</Name><Methods><Method><Name>modified</Name>" +
+            "<Source><![CDATA[" + siblingSource + "]]></Source>" +
+            "</Method></Methods></Control>" +
+            "</DataControls></SourceCode><Design>",
+            StringComparison.Ordinal);
+        var capture = new BridgeCapture(xml);
+        using var harness = FakeBridge.Create(capture.Respond);
+
+        var result = ObjectModifyEngine.ModifyCore(new ObjectModifyEngine.ModifyRequest
+        {
+            Operation = ObjectModifyEngine.Operation.RemoveControl,
+            Kind = "form",
+            ObjectName = "FmVehicleList",
+            Member = "Nested",
+            Model = "FleetCustom",
+        }, _repo, harness.Client, _journalDb);
+
+        Assert.True(result.Ok, result.Error?.Message);
+        Assert.Equal(1, capture.WriteCount);
+        var written = XDocument.Parse((string)capture.WriteArgs!["xml"]!);
+        var sourceCode = written.Root!.Elements().Single(e => e.Name.LocalName == "SourceCode");
+        var controlSources = sourceCode.Elements().Single(e => e.Name.LocalName == "DataControls")
+            .Elements().Where(e => e.Name.LocalName == "Control").ToArray();
+        Assert.Single(controlSources);
+        Assert.Equal("Existing", controlSources[0].Element("Name")?.Value);
+        Assert.Equal(siblingSource, controlSources[0].Descendants("Source").Single().Value);
+        Assert.DoesNotContain(written.Descendants("AxFormControl"),
+            e => e.Element("Name")?.Value is "Nested" or "NestedExisting");
+        Assert.Contains(written.Descendants("AxFormControl"),
+            e => e.Element("Name")?.Value == "Existing");
+    }
+
+    [Fact]
     public void A_table_operation_on_a_form_is_refused_by_the_name_the_caller_typed()
     {
         var capture = new BridgeCapture(FormXml);
