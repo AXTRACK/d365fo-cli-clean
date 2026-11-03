@@ -392,6 +392,27 @@ public sealed class MethodModifyEngineTests : IDisposable
         Assert.Contains("return 2;", WrittenSource(xml!, "calc"));
     }
 
+    [Fact]
+    public void Modifying_one_class_method_preserves_unrelated_method_source_exactly()
+    {
+        const string sibling = "\n    /// <summary>Keep original text.</summary>\n    public void untouched()\n    {\n        info(\"do not rewrite\");\n    }\n";
+        var xml = ClassXmlWithMethod.Replace(
+            "</Methods>",
+            "<Method><Name>untouched</Name><Source><![CDATA[" + sibling + "]]></Source></Method></Methods>",
+            StringComparison.Ordinal);
+
+        var (result, writtenXml, writeCalled) = RunModify(
+            xml,
+            new MethodModifyEngine.ModifyRequest(
+                "class", "CustBalance", "calc", "return 2;", Model: "ApplicationSuite"));
+
+        Assert.True(result.Ok, result.Error?.Message);
+        Assert.True(writeCalled);
+        Assert.NotNull(writtenXml);
+        Assert.Equal(sibling, WrittenSource(writtenXml!, "untouched"));
+        Assert.Contains("return 2;", WrittenSource(writtenXml!, "calc"));
+    }
+
     private static JsonObject Response(JsonObject request, JsonObject result) => new()
     {
         ["jsonrpc"] = "2.0",
