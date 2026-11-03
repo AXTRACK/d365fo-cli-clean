@@ -187,6 +187,47 @@ public sealed class ObjectModifyEngineTests : IDisposable
     }
 
     [Fact]
+    public void Ordered_batch_can_remove_an_index_then_the_field_it_referenced()
+    {
+        const string xml =
+            "<AxTable><Name>FmVehicle</Name><Fields>" +
+            "<AxTableField><Name>VIN</Name></AxTableField></Fields>" +
+            "<Indexes><AxTableIndex><Name>VINIdx</Name><Fields>" +
+            "<AxTableIndexField><DataField>VIN</DataField></AxTableIndexField>" +
+            "</Fields></AxTableIndex></Indexes></AxTable>";
+        var capture = new BridgeCapture(xml);
+        using var harness = FakeBridge.Create(capture.Respond);
+
+        var result = ObjectModifyEngine.ModifyCore(new ObjectModifyEngine.ModifyRequest
+        {
+            Operation = ObjectModifyEngine.Operation.SetProperty,
+            Kind = "table",
+            ObjectName = "FmVehicle",
+            Member = "batch",
+            Model = "FleetCustom",
+            Batch = new[]
+            {
+                new ObjectModifyEngine.ModifyRequest
+                {
+                    Operation = ObjectModifyEngine.Operation.RemoveIndex,
+                    Kind = "table", ObjectName = "FmVehicle", Member = "VINIdx",
+                },
+                new ObjectModifyEngine.ModifyRequest
+                {
+                    Operation = ObjectModifyEngine.Operation.RemoveField,
+                    Kind = "table", ObjectName = "FmVehicle", Member = "VIN",
+                },
+            },
+        }, _repo, harness.Client, _journalDb);
+
+        Assert.True(result.Ok, result.Error?.Message);
+        Assert.Equal(1, capture.WriteCount);
+        var written = XDocument.Parse((string)capture.WriteArgs!["xml"]!);
+        Assert.Empty(written.Descendants("AxTableField"));
+        Assert.Empty(written.Descendants("AxTableIndex"));
+    }
+
+    [Fact]
     public void A_refused_step_discards_the_whole_batch_and_writes_nothing()
     {
         var capture = new BridgeCapture(CustomTableXml);
@@ -1116,6 +1157,35 @@ public sealed class ObjectModifyEngineTests : IDisposable
         Assert.False(result.Ok, "Form control names must be unique across the entire design tree.");
         Assert.Equal(D365FoErrorCodes.AlreadyExists, result.Error!.Code);
         Assert.Null(capture.WriteVerb);
+    }
+
+    [Fact]
+    public void Add_unique_control_inside_nested_group_keeps_other_controls()
+    {
+        var capture = new BridgeCapture(NestedFormXml);
+        using var harness = FakeBridge.Create(capture.Respond);
+
+        var result = ObjectModifyEngine.ModifyCore(new ObjectModifyEngine.ModifyRequest
+        {
+            Operation = ObjectModifyEngine.Operation.AddControl,
+            Kind = "form",
+            ObjectName = "FmVehicleList",
+            Member = "UniqueNested",
+            Type = "String",
+            Parent = "Nested",
+            Model = "FleetCustom",
+        }, _repo, harness.Client, _journalDb);
+
+        Assert.True(result.Ok, result.Error?.Message);
+        Assert.Equal(1, capture.WriteCount);
+        var written = XDocument.Parse((string)capture.WriteArgs!["xml"]!);
+        var inserted = written.Descendants("AxFormControl")
+            .Single(e => e.Element("Name")?.Value == "UniqueNested");
+        Assert.Equal("Nested", inserted.Parent!.Parent!.Element("Name")?.Value);
+        Assert.Contains(written.Descendants("AxFormControl"),
+            e => e.Element("Name")?.Value == "NestedExisting");
+        Assert.Contains(written.Descendants("AxFormControl"),
+            e => e.Element("Name")?.Value == "Existing");
     }
 
     [Fact]
