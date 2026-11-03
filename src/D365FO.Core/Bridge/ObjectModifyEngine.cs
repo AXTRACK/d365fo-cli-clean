@@ -1190,11 +1190,34 @@ public static class ObjectModifyEngine
         }
 
         // Removing a container takes its children with it — say so, rather than reporting "1".
+        // Form control override methods live separately under SourceCode/DataControls.
+        // Remove only the entries owned by the deleted control/subtree: leaving them behind
+        // creates orphaned X++ methods while removing an unrelated owner loses source.
+        var removedNames = control.DescendantsAndSelf()
+            .Where(e => e.Name.LocalName.StartsWith("AxFormControl", StringComparison.Ordinal))
+            .Select(e => LocalValue(e, "Name") ?? string.Empty)
+            .Where(name => name.Length > 0)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
         var descendants = control.Descendants()
             .Count(e => e.Name.LocalName.StartsWith("AxFormControl", StringComparison.Ordinal));
+        var sourceCode = root.Elements().FirstOrDefault(e => e.Name.LocalName == "SourceCode");
+        var dataControls = sourceCode?.Elements()
+            .FirstOrDefault(e => e.Name.LocalName == "DataControls");
+        var removedMethodEntries = dataControls?.Elements()
+            .Where(e => e.Name.LocalName == "Control" &&
+                        removedNames.Contains(LocalValue(e, "Name") ?? string.Empty))
+            .ToList() ?? new List<XElement>();
+        foreach (var entry in removedMethodEntries)
+            entry.Remove();
+
         control.Remove();
 
-        return (new { removedControl = request.Member, nestedControlsRemoved = descendants }, null);
+        return (new
+        {
+            removedControl = request.Member,
+            nestedControlsRemoved = descendants,
+            controlMethodEntriesRemoved = removedMethodEntries.Count,
+        }, null);
     }
 
     /// <summary>
