@@ -94,6 +94,16 @@ public sealed class ObjectModifyEngineTests : IDisposable
         "<Name>Grid</Name><Type>Grid</Type><Controls /></AxFormControl>" +
         "</Controls></Design></AxForm>";
 
+    // Real AxForm design controls use AxFormControl with an xsi:type discriminator.
+    // A synthetic AxFormControlGroup element cannot be used as a production-shaped fixture.
+    private const string NestedFormXml =
+        "<AxForm xmlns:i=\"http://www.w3.org/2001/XMLSchema-instance\"><Name>FmVehicleList</Name><Design><Controls>" +
+        "<AxFormControl i:type=\"AxFormGroupControl\"><Name>Grid</Name><Type>Group</Type><FormControlExtension i:nil=\"true\"/><Controls>" +
+        "<AxFormControl i:type=\"AxFormStringControl\"><Name>Existing</Name><Type>String</Type><Label>Original label</Label><FormControlExtension i:nil=\"true\"/></AxFormControl>" +
+        "<AxFormControl i:type=\"AxFormGroupControl\"><Name>Nested</Name><Type>Group</Type><FormControlExtension i:nil=\"true\"/><Controls>" +
+        "<AxFormControl i:type=\"AxFormStringControl\"><Name>NestedExisting</Name><Type>String</Type><FormControlExtension i:nil=\"true\"/></AxFormControl>" +
+        "</Controls></AxFormControl></Controls></AxFormControl></Controls></Design></AxForm>";
+
     // ---- kind coverage, batching, query and security --------------------------
 
     [Fact]
@@ -679,6 +689,62 @@ public sealed class ObjectModifyEngineTests : IDisposable
             .Descendants("DataField").Single().Value);
     }
 
+    [Theory]
+    [InlineData("<Indexes><AxTableIndex><Name>VINIdx</Name><Fields><AxTableIndexField><DataField>VIN</DataField></AxTableIndexField></Fields></AxTableIndex></Indexes>", "Indexes")]
+    [InlineData("<FieldGroups><AxTableFieldGroup><Name>VehicleGroup</Name><Fields><AxTableFieldGroupField><DataField>VIN</DataField></AxTableFieldGroupField></Fields></AxTableFieldGroup></FieldGroups>", "FieldGroups")]
+    [InlineData("<Relations><AxTableRelation><Name>VehicleRelation</Name><Constraints><AxTableRelationConstraint><Name>VehicleConstraint</Name><Field>VIN</Field><RelatedField>VehicleId</RelatedField></AxTableRelationConstraint></Constraints></AxTableRelation></Relations>", "Relations")]
+    public void Remove_table_field_refuses_dangling_metadata_references(string dependencyXml, string collection)
+    {
+        var xml = "<AxTable><Name>FmVehicle</Name><Fields><AxTableField><Name>VIN</Name></AxTableField></Fields>" +
+                  dependencyXml + "</AxTable>";
+        var capture = new BridgeCapture(xml);
+        using var harness = FakeBridge.Create(capture.Respond);
+
+        var result = ObjectModifyEngine.ModifyCore(new ObjectModifyEngine.ModifyRequest
+        {
+            Operation = ObjectModifyEngine.Operation.RemoveField,
+            Kind = "table",
+            ObjectName = "FmVehicle",
+            Member = "VIN",
+            Model = "FleetCustom",
+        }, _repo, harness.Client, _journalDb);
+
+        Assert.False(result.Ok, "Removing a referenced field would persist invalid AOT metadata.");
+        Assert.Equal(D365FoErrorCodes.BadInput, result.Error!.Code);
+        Assert.Contains(collection, result.Error.Message);
+        Assert.Null(capture.WriteVerb);
+    }
+
+    [Fact]
+    public void Remove_unreferenced_table_field_preserves_unrelated_index()
+    {
+        const string xml =
+            "<AxTable><Name>FmVehicle</Name><Fields>" +
+            "<AxTableField><Name>Note</Name></AxTableField>" +
+            "<AxTableField><Name>VIN</Name></AxTableField></Fields>" +
+            "<Indexes><AxTableIndex><Name>VINIdx</Name><Fields>" +
+            "<AxTableIndexField><DataField>VIN</DataField></AxTableIndexField>" +
+            "</Fields></AxTableIndex></Indexes></AxTable>";
+        var capture = new BridgeCapture(xml);
+        using var harness = FakeBridge.Create(capture.Respond);
+
+        var result = ObjectModifyEngine.ModifyCore(new ObjectModifyEngine.ModifyRequest
+        {
+            Operation = ObjectModifyEngine.Operation.RemoveField,
+            Kind = "table",
+            ObjectName = "FmVehicle",
+            Member = "Note",
+            Model = "FleetCustom",
+        }, _repo, harness.Client, _journalDb);
+
+        Assert.True(result.Ok, result.Error?.Message);
+        Assert.Equal(1, capture.WriteCount);
+        var written = XDocument.Parse((string)capture.WriteArgs!["xml"]!);
+        Assert.DoesNotContain(written.Descendants("AxTableField"), e => e.Element("Name")?.Value == "Note");
+        Assert.Contains(written.Descendants("AxTableField"), e => e.Element("Name")?.Value == "VIN");
+        Assert.Equal("VIN", written.Descendants("AxTableIndexField").Single().Element("DataField")?.Value);
+    }
+
     [Fact]
     public void Remove_index_refuses_a_name_that_is_not_there_and_writes_nothing()
     {
@@ -1004,15 +1070,7 @@ public sealed class ObjectModifyEngineTests : IDisposable
     [Fact]
     public void Add_form_control_preserves_existing_sibling_and_nested_control()
     {
-        const string xml =
-            "<AxForm><Name>FmVehicleList</Name><Design><Controls>" +
-            "<AxFormControlGroup><Name>Grid</Name><Controls>" +
-            "<AxFormControlString><Name>Existing</Name><Label>Original label</Label></AxFormControlString>" +
-            "<AxFormControlGroup><Name>Nested</Name><Controls>" +
-            "<AxFormControlString><Name>NestedExisting</Name></AxFormControlString>" +
-            "</Controls></AxFormControlGroup>" +
-            "</Controls></AxFormControlGroup></Controls></Design></AxForm>";
-        var capture = new BridgeCapture(xml);
+        var capture = new BridgeCapture(NestedFormXml);
         using var harness = FakeBridge.Create(capture.Respond);
 
         var result = ObjectModifyEngine.ModifyCore(new ObjectModifyEngine.ModifyRequest
@@ -1036,6 +1094,28 @@ public sealed class ObjectModifyEngineTests : IDisposable
         Assert.Equal("Original label", written.Descendants()
             .Single(e => e.Element("Name")?.Value == "Existing").Element("Label")?.Value);
         Assert.Equal(1, written.Descendants("Name").Count(e => e.Value == "NewControl"));
+    }
+
+    [Fact]
+    public void Add_form_control_refuses_duplicate_name_in_another_nested_container()
+    {
+        var capture = new BridgeCapture(NestedFormXml);
+        using var harness = FakeBridge.Create(capture.Respond);
+
+        var result = ObjectModifyEngine.ModifyCore(new ObjectModifyEngine.ModifyRequest
+        {
+            Operation = ObjectModifyEngine.Operation.AddControl,
+            Kind = "form",
+            ObjectName = "FmVehicleList",
+            Member = "NestedExisting",
+            Type = "String",
+            Parent = "Grid",
+            Model = "FleetCustom",
+        }, _repo, harness.Client, _journalDb);
+
+        Assert.False(result.Ok, "Form control names must be unique across the entire design tree.");
+        Assert.Equal(D365FoErrorCodes.AlreadyExists, result.Error!.Code);
+        Assert.Null(capture.WriteVerb);
     }
 
     [Fact]
