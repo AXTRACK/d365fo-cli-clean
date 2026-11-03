@@ -640,6 +640,46 @@ public sealed class ObjectModifyEngineTests : IDisposable
     }
 
     [Fact]
+    public void Rename_table_field_preserves_unrelated_field_and_index_members()
+    {
+        const string xml =
+            "<AxTable><Name>FmVehicle</Name><Fields>" +
+            "<AxTableField><Name>VehicleId</Name></AxTableField>" +
+            "<AxTableField><Name>KeepMe</Name><Label>Unchanged label</Label></AxTableField>" +
+            "</Fields><Indexes><AxTableIndex><Name>VehicleIdx</Name><Fields>" +
+            "<AxTableIndexField><DataField>VehicleId</DataField></AxTableIndexField>" +
+            "</Fields></AxTableIndex><AxTableIndex><Name>KeepIdx</Name><Fields>" +
+            "<AxTableIndexField><DataField>KeepMe</DataField></AxTableIndexField>" +
+            "</Fields></AxTableIndex></Indexes></AxTable>";
+        var capture = new BridgeCapture(xml);
+        using var harness = FakeBridge.Create(capture.Respond);
+
+        var result = ObjectModifyEngine.ModifyCore(new ObjectModifyEngine.ModifyRequest
+        {
+            Operation = ObjectModifyEngine.Operation.RenameField,
+            Kind = "table",
+            ObjectName = "FmVehicle",
+            Member = "VehicleId",
+            NewName = "VehicleNumber",
+            Model = "FleetCustom",
+        }, _repo, harness.Client, _journalDb);
+
+        Assert.True(result.Ok, result.Error?.Message);
+        Assert.Equal(1, capture.WriteCount);
+        var written = XDocument.Parse((string)capture.WriteArgs!["xml"]!);
+        var fields = written.Descendants("AxTableField").ToArray();
+        Assert.Equal(2, fields.Length);
+        Assert.Contains(fields, e => e.Element("Name")?.Value == "VehicleNumber");
+        Assert.Contains(fields, e => e.Element("Name")?.Value == "KeepMe" &&
+                                     e.Element("Label")?.Value == "Unchanged label");
+        var indexes = written.Descendants("AxTableIndex").ToArray();
+        Assert.Equal("VehicleNumber", indexes.Single(e => e.Element("Name")?.Value == "VehicleIdx")
+            .Descendants("DataField").Single().Value);
+        Assert.Equal("KeepMe", indexes.Single(e => e.Element("Name")?.Value == "KeepIdx")
+            .Descendants("DataField").Single().Value);
+    }
+
+    [Fact]
     public void Remove_index_refuses_a_name_that_is_not_there_and_writes_nothing()
     {
         var capture = new BridgeCapture(CustomTableXml);
