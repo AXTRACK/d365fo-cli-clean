@@ -297,7 +297,7 @@ public sealed class IndexExtractCommand : Command<IndexExtractCommand.Settings>
             // (parallelism + 1) parsed batches at a time, capping memory usage while
             // keeping the consumer fed.
             var queue = new System.Collections.Concurrent.BlockingCollection<(
-                ExtractBatch Batch, string Fp, DateTime StartedUtc, long ParseMs)>(
+                ExtractBatch Batch, string Fp, DateTime StartedUtc, long ParseMs, string ModelDir)>(
                 boundedCapacity: effectiveParallelism + 1);
             var cts = new System.Threading.CancellationTokenSource();
 
@@ -346,7 +346,7 @@ public sealed class IndexExtractCommand : Command<IndexExtractCommand.Settings>
                             }
                             catch { return; }
                             parseSw.Stop();
-                            try { queue.Add((batch, fp, startedUtc, parseSw.ElapsedMilliseconds), cts.Token); }
+                            try { queue.Add((batch, fp, startedUtc, parseSw.ElapsedMilliseconds, modelDir), cts.Token); }
                             catch (OperationCanceledException) { /* consumer cancelled; stop */ }
                         });
                 }
@@ -356,7 +356,7 @@ public sealed class IndexExtractCommand : Command<IndexExtractCommand.Settings>
 
             try
             {
-                foreach (var (batch, fp, startedUtc, parseMs) in queue.GetConsumingEnumerable())
+                foreach (var (batch, fp, startedUtc, parseMs, modelDir) in queue.GetConsumingEnumerable())
                 {
                     onStart?.Invoke(batch.Model);
                     var writeSw = System.Diagnostics.Stopwatch.StartNew();
@@ -372,6 +372,7 @@ public sealed class IndexExtractCommand : Command<IndexExtractCommand.Settings>
                     per.Add(new
                     {
                         model = batch.Model,
+                        sourceRoot = Path.GetFullPath(modelDir),
                         isCustom = batch.IsCustom,
                         tables = batch.Tables.Count,
                         classes = batch.Classes.Count,

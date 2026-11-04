@@ -1190,11 +1190,34 @@ public static class ObjectModifyEngine
         }
 
         // Removing a container takes its children with it — say so, rather than reporting "1".
+        // Form control override methods live separately under SourceCode/DataControls.
+        // Remove only the entries owned by the deleted control/subtree: leaving them behind
+        // creates orphaned X++ methods while removing an unrelated owner loses source.
+        var removedNames = control.DescendantsAndSelf()
+            .Where(e => e.Name.LocalName.StartsWith("AxFormControl", StringComparison.Ordinal))
+            .Select(e => LocalValue(e, "Name") ?? string.Empty)
+            .Where(name => name.Length > 0)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
         var descendants = control.Descendants()
             .Count(e => e.Name.LocalName.StartsWith("AxFormControl", StringComparison.Ordinal));
+        var sourceCode = root.Elements().FirstOrDefault(e => e.Name.LocalName == "SourceCode");
+        var dataControls = sourceCode?.Elements()
+            .FirstOrDefault(e => e.Name.LocalName == "DataControls");
+        var removedMethodEntries = dataControls?.Elements()
+            .Where(e => e.Name.LocalName == "Control" &&
+                        removedNames.Contains(LocalValue(e, "Name") ?? string.Empty))
+            .ToList() ?? new List<XElement>();
+        foreach (var entry in removedMethodEntries)
+            entry.Remove();
+
         control.Remove();
 
-        return (new { removedControl = request.Member, nestedControlsRemoved = descendants }, null);
+        return (new
+        {
+            removedControl = request.Member,
+            nestedControlsRemoved = descendants,
+            controlMethodEntriesRemoved = removedMethodEntries.Count,
+        }, null);
     }
 
     /// <summary>
@@ -1373,6 +1396,33 @@ public static class ObjectModifyEngine
             return (null, ToolResult<object>.Fail(D365FoErrorCodes.MemberNotFound,
                 $"{shape.Noun} '{wanted}' was not found on {request.ObjectName}.",
                 $"Nothing was changed. Check the current members with `d365fo get {request.Kind} {request.ObjectName}`."));
+        }
+
+        // A field used by an index, field group or relation cannot be dropped in isolation:
+        // the bridge would otherwise persist references to a field that no longer exists.
+        // Refuse before journaling/writing; callers can remove dependencies first in a
+        // single ordered batch, or explicitly decide how to replace those references.
+        if (request.Operation == Operation.RemoveField)
+        {
+            foreach (var (collectionName, referencedMember) in new[]
+                     {
+                         ("Indexes", "DataField"),
+                         ("FieldGroups", "DataField"),
+                         ("Relations", "Field"),
+                     })
+            {
+                var dependencyCollection = root.Elements()
+                    .FirstOrDefault(e => e.Name.LocalName == collectionName);
+                if (dependencyCollection?.Descendants().Any(e =>
+                        e.Name.LocalName == referencedMember &&
+                        string.Equals(e.Value, wanted, StringComparison.OrdinalIgnoreCase)) == true)
+                {
+                    return (null, ToolResult<object>.Fail(D365FoErrorCodes.BadInput,
+                        $"Cannot remove field '{wanted}' from {request.ObjectName}: referenced by {collectionName}.",
+                        "Remove or update dependent metadata first (an ordered batch is supported). " +
+                        "Review X++ field references separately before deleting the field."));
+                }
+            }
         }
 
         var removed = member.ToString(SaveOptions.DisableFormatting);
@@ -1605,10 +1655,14 @@ public static class ObjectModifyEngine
             container.Add(controls);
         }
 
-        if (controls.Elements().Any(e => string.Equals(LocalValue(e, "Name"), request.Member, StringComparison.OrdinalIgnoreCase)))
+        // AOT form-control names are unique for the whole design, not just siblings.
+        // Checking only the chosen parent allowed duplicate names under nested groups.
+        if (design.Descendants().Any(e =>
+                e.Name.LocalName == "AxFormControl" &&
+                string.Equals(LocalValue(e, "Name"), request.Member, StringComparison.OrdinalIgnoreCase)))
         {
             return (null, ToolResult<object>.Fail(D365FoErrorCodes.AlreadyExists,
-                $"Control '{request.Member}' already exists under {request.Parent ?? "Design"}."));
+                $"Control '{request.Member}' already exists in the design of {request.ObjectName}."));
         }
 
         var control = string.IsNullOrWhiteSpace(request.DataField)
