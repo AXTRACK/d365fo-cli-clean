@@ -56,7 +56,8 @@ public static class MethodModifyEngine
         string? NewBody,
         string? Model = null,
         string? GroundingToken = null,
-        string? NewSource = null);
+        string? NewSource = null,
+        bool Create = false);
 
     /// <summary>
     /// Build <see cref="BridgeOptions"/> from the unified config resolver (env vars or
@@ -142,6 +143,10 @@ public static class MethodModifyEngine
                 "Run `d365fo index build` + `d365fo index extract`, or pass --model <MODEL> explicitly.");
         }
 
+        if (request.Create && !ObjectModifyEngine.IsCustomModel(model, repo))
+            return ToolResult<object>.Fail(D365FoErrorCodes.BadInput,
+                $"Adding a method in model '{model}' is blocked: only explicitly configured custom models are writable. Create a class extension instead.");
+
         // ---- 2. Read the live object via the bridge ----
         JsonObject? readResult;
         try
@@ -178,6 +183,14 @@ public static class MethodModifyEngine
         }
 
         var methodsContainer = LocateMethodsContainer(doc.Root);
+        if (methodsContainer is null && request.Create && kind == "class")
+        {
+            var sourceCode = doc.Root?.Elements().FirstOrDefault(e => e.Name.LocalName == "SourceCode");
+            if (sourceCode is null)
+                return ToolResult<object>.Fail(D365FoErrorCodes.BadInput, "Class has no SourceCode container.");
+            methodsContainer = new XElement(sourceCode.Name.Namespace + "Methods");
+            sourceCode.Add(methodsContainer);
+        }
         if (methodsContainer is null)
         {
             return ToolResult<object>.Fail(D365FoErrorCodes.MethodNotFound,
@@ -187,6 +200,16 @@ public static class MethodModifyEngine
         var existing = methodsContainer.Elements()
             .FirstOrDefault(e => e.Name.LocalName == "Method" &&
                                   string.Equals(Local(e, "Name"), request.MethodName, StringComparison.OrdinalIgnoreCase));
+        if (request.Create && existing is not null)
+            return ToolResult<object>.Fail(D365FoErrorCodes.BadInput, $"Method '{request.MethodName}' already exists; use replace mode.");
+        if (request.Create)
+        {
+            if (IsInterface(doc.Root))
+                return ToolResult<object>.Fail(D365FoErrorCodes.BadInput, "Adding an implemented method to an interface is not supported.");
+            existing = new XElement(methodsContainer.Name.Namespace + "Method",
+                new XElement(methodsContainer.Name.Namespace + "Name", request.MethodName));
+            methodsContainer.Add(existing);
+        }
         if (existing is null)
         {
             var known = methodsContainer.Elements()
@@ -201,7 +224,7 @@ public static class MethodModifyEngine
                     : $"{request.ObjectName} declares no methods. Use `d365fo generate` commands to scaffold a new object instead.");
         }
 
-        var oldBody = Local(existing, "Source") ?? string.Empty;
+        var oldBody = request.Create ? string.Empty : Local(existing, "Source") ?? string.Empty;
 
         // ---- 3b. Build the new <Source> before anything is validated or journaled ----
         // --body is spliced between the outer braces, so the doc comment, attributes and
@@ -290,7 +313,7 @@ public static class MethodModifyEngine
             method = request.MethodName,
             model,
             source = "bridge",
-            mode = hasBody ? "body" : "source",
+            mode = request.Create ? "create" : hasBody ? "body" : "source",
             oldBody,
             newBody = newSource,
             grounding,
@@ -401,6 +424,9 @@ public static class MethodModifyEngine
     {
         var hasBody = !string.IsNullOrWhiteSpace(request.NewBody);
         var hasSource = !string.IsNullOrWhiteSpace(request.NewSource);
+        if (request.Create && (!string.Equals(request.Kind, "class", StringComparison.OrdinalIgnoreCase) || !hasSource || hasBody))
+            return ToolResult<object>.Fail(D365FoErrorCodes.BadInput,
+                "Creating a method requires kind=class and exactly one complete --source declaration (no --body).");
         if (hasBody == hasSource)
         {
             return ToolResult<object>.Fail(D365FoErrorCodes.BadInput,
@@ -443,7 +469,7 @@ public static class MethodModifyEngine
         {
             return ToolResult<object>.Fail(D365FoErrorCodes.BadInput,
                 $"--source declares {declared.Count} methods ({string.Join(", ", declared)}). One <Method> node holds one method.",
-                "Pass one method. Add further methods with `generate` instead.");
+                "Pass exactly one method. Use --create to add a new method to an existing custom-model class.");
         }
 
         if (!string.Equals(declared[0], methodName, StringComparison.OrdinalIgnoreCase))

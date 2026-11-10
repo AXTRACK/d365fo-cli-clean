@@ -26,7 +26,7 @@ public sealed class ModifyMethodCommand : Command<ModifyMethodCommand.Settings>
         public string ObjectName { get; init; } = "";
 
         [CommandArgument(2, "<METHOD>")]
-        [System.ComponentModel.Description("Existing method name whose body is being replaced.")]
+        [System.ComponentModel.Description("Method name. Existing by default; with --create, a missing method on a custom class.")]
         public string Method { get; init; } = "";
 
         [CommandOption("--body <XPP>")]
@@ -44,6 +44,10 @@ public sealed class ModifyMethodCommand : Command<ModifyMethodCommand.Settings>
         [CommandOption("--grounding-token <TOKEN>")]
         [System.ComponentModel.Description("Grounding token from `d365fo prepare change`/`prepare create`. Required for the token check when D365FO_GROUNDING_ENFORCE=true; the reference/BP validation gate itself always blocks on error-severity findings.")]
         public string? GroundingToken { get; init; }
+
+        [CommandOption("--create")]
+        [System.ComponentModel.Description("Add a new method to an existing class. Requires --source with one complete method; refuses duplicates.")]
+        public bool Create { get; init; }
     }
 
     public override int Execute(CommandContext ctx, Settings settings)
@@ -69,7 +73,8 @@ public sealed class ModifyMethodCommand : Command<ModifyMethodCommand.Settings>
             settings.Body,
             settings.Model,
             settings.GroundingToken,
-            settings.Source);
+            settings.Source,
+            settings.Create);
 
         var result = MethodModifyEngine.Modify(request, repo);
         return RenderHelpers.Render(kind, result);
