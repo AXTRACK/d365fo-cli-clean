@@ -143,9 +143,21 @@ public static class MethodModifyEngine
                 "Run `d365fo index build` + `d365fo index extract`, or pass --model <MODEL> explicitly.");
         }
 
-        if (request.Create && !ObjectModifyEngine.IsCustomModel(model, repo))
-            return ToolResult<object>.Fail(D365FoErrorCodes.BadInput,
-                $"Adding a method in model '{model}' is blocked: only explicitly configured custom models are writable. Create a class extension instead.");
+        if (request.Create)
+        {
+            // A caller-supplied --model is a destination hint, never evidence of ownership.
+            // Fail closed when the index cannot establish the class's owning model.
+            var indexedOwner = repo?.GetClassDetails(request.ObjectName)?.Class.Model;
+            if (string.IsNullOrWhiteSpace(indexedOwner))
+                return ToolResult<object>.Fail(D365FoErrorCodes.BadInput,
+                    $"Cannot verify the owning model of class '{request.ObjectName}' from the index; refusing to add a method.");
+            if (!string.Equals(indexedOwner, model, StringComparison.OrdinalIgnoreCase))
+                return ToolResult<object>.Fail(D365FoErrorCodes.BadInput,
+                    $"Class '{request.ObjectName}' belongs to model '{indexedOwner}', not requested model '{model}'.");
+            if (!ObjectModifyEngine.IsCustomModel(indexedOwner, repo))
+                return ToolResult<object>.Fail(D365FoErrorCodes.BadInput,
+                    $"Adding a method in model '{indexedOwner}' is blocked: only explicitly configured custom models are writable. Create a class extension instead.");
+        }
 
         // ---- 2. Read the live object via the bridge ----
         JsonObject? readResult;
