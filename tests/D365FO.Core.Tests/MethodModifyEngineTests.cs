@@ -46,6 +46,12 @@ public sealed class MethodModifyEngineTests : IDisposable
             CocExtensions: Array.Empty<ExtractedCoc>(),
             Labels: Array.Empty<ExtractedLabel>());
         _repo.ApplyExtract(batch);
+        _repo.ApplyExtract(batch with
+        {
+            Model = "DEDCoreModel",
+            IsCustom = true,
+            Classes = new[] { new ExtractedClass("NinjaCustom", null, false, false, "x", Array.Empty<ExtractedMethod>()) },
+        });
     }
 
     public void Dispose()
@@ -91,6 +97,77 @@ public sealed class MethodModifyEngineTests : IDisposable
         // The whole method, not just the statements: the signature and braces survive (#231).
         Assert.Equal("\n    real calc()\n    {\n        return 2;\n    }\n",
             WrittenSource(capturedUpdateArgs["xml"]!.GetValue<string>(), "calc"));
+    }
+
+    private static readonly string CustomClassXmlWithMethod = ClassXmlWithMethod.Replace("CustBalance", "NinjaCustom", StringComparison.Ordinal);
+
+    [Fact]
+    public void Create_adds_first_method_to_empty_class_without_changing_declaration()
+    {
+        const string xml = "<AxClass><Name>NinjaCustom</Name><SourceCode><Declaration><![CDATA[public final class NinjaCustom { }]]></Declaration></SourceCode></AxClass>";
+        var (result, written, called) = RunModify(xml,
+            new MethodModifyEngine.ModifyRequest("class", "NinjaCustom", "calculate", null,
+                Model: "DEDCoreModel", NewSource: "public static int calculate() { return 1; }", Create: true));
+        Assert.True(result.Ok, result.Error?.Message);
+        Assert.True(called);
+        var doc = System.Xml.Linq.XDocument.Parse(written!);
+        Assert.Equal("public final class NinjaCustom { }", doc.Descendants("Declaration").Single().Value);
+        Assert.Equal("calculate", doc.Descendants("Method").Single().Element("Name")!.Value);
+        Assert.Equal("public static int calculate() { return 1; }", WrittenSource(written!, "calculate"));
+    }
+
+    [Fact]
+    public void Create_preserves_existing_methods_and_refuses_duplicates()
+    {
+        var (added, written, called) = RunModify(CustomClassXmlWithMethod,
+            new MethodModifyEngine.ModifyRequest("class", "NinjaCustom", "calculate", null,
+                Model: "DEDCoreModel", NewSource: "public static int calculate() { return 1; }", Create: true));
+        Assert.True(added.Ok, added.Error?.Message);
+        Assert.True(called);
+        Assert.Equal(2, System.Xml.Linq.XDocument.Parse(written!).Descendants("Method").Count());
+        Assert.Equal("\n    real calc()\n    {\n        return 1;\n    }\n", WrittenSource(written!, "calc"));
+
+        var (duplicate, _, duplicateWrite) = RunModify(CustomClassXmlWithMethod,
+            new MethodModifyEngine.ModifyRequest("class", "NinjaCustom", "calc", null,
+                Model: "DEDCoreModel", NewSource: "public real calc() { return 2; }", Create: true));
+        Assert.False(duplicate.Ok);
+        Assert.False(duplicateWrite);
+    }
+
+    [Fact]
+    public void Create_rejects_caller_model_override_for_standard_class()
+    {
+        var (result, _, writeCalled) = RunModify(ClassXmlWithMethod,
+            new MethodModifyEngine.ModifyRequest("class", "CustBalance", "calculate", null,
+                Model: "DEDCoreModel", NewSource: "public static int calculate() { return 1; }", Create: true));
+        Assert.False(result.Ok);
+        Assert.False(writeCalled);
+        Assert.Contains("belongs to model", result.Error!.Message);
+    }
+
+    [Fact]
+    public void Create_rejects_unindexed_class_even_with_custom_model_override()
+    {
+        var (result, _, writeCalled) = RunModify(
+            "<AxClass><Name>UnindexedClass</Name><SourceCode /></AxClass>",
+            new MethodModifyEngine.ModifyRequest("class", "UnindexedClass", "calculate", null,
+                Model: "DEDCoreModel", NewSource: "public static int calculate() { return 1; }", Create: true));
+        Assert.False(result.Ok);
+        Assert.False(writeCalled);
+        Assert.Contains("Cannot verify", result.Error!.Message);
+    }
+
+    [Fact]
+    public void Create_requires_complete_single_method_source_and_class_kind()
+    {
+        var missingSource = MethodModifyEngine.CheckInput(new MethodModifyEngine.ModifyRequest(
+            "class", "CustBalance", "calculate", "return 1;", Create: true));
+        Assert.NotNull(missingSource);
+        Assert.False(missingSource!.Ok);
+        var table = MethodModifyEngine.CheckInput(new MethodModifyEngine.ModifyRequest(
+            "table", "CustTable", "calculate", null, NewSource: "public void calculate() {}", Create: true));
+        Assert.NotNull(table);
+        Assert.False(table!.Ok);
     }
 
     [Fact]

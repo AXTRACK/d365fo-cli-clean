@@ -706,12 +706,12 @@ public static class ToolCatalog
             "`body` — statements only, they replace what sits between the method's outer braces and the doc comment, " +
             "attributes and signature are kept (a full declaration is refused); `source` — the whole method, " +
             "signature included, which must declare exactly one method named `method`. Use generate_object to " +
-            "create new objects/methods; use this only to change an existing method.",
+            "create new objects. Set `create=true` with `kind=class` and one full `source` to add a missing method to an existing custom-model class; duplicate methods and non-custom models are refused.",
             Schema(("kind", "string", true), ("name", "string", true), ("method", "string", true),
                    ("body", "string", false), ("source", "string", false), ("model", "string", false),
-                   ("groundingToken", "string", false)),
+                   ("groundingToken", "string", false), ("create", "boolean", false)),
             (h, p) => h.ModifyMethod(Str(p, "kind"), Str(p, "name"), Str(p, "method"), StrOrNull(p, "body"),
-                        StrOrNull(p, "model"), StrOrNull(p, "groundingToken"), StrOrNull(p, "source"))),
+                        StrOrNull(p, "model"), StrOrNull(p, "groundingToken"), StrOrNull(p, "source"), Bool(p, "create"))),
 
         new Descriptor("modify_object", ToolEffect.Destructive,
             "Structured edits to an EXISTING object beyond its method bodies, via D365FO.Bridge (Windows VM, " +
