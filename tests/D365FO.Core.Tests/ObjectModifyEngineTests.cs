@@ -1479,7 +1479,17 @@ public sealed class ObjectModifyEngineTests : IDisposable
             "</Methods></SourceCode></AxClass>";
 
         var capture = new BridgeCapture(classXml);
-        using var harness = FakeBridge.Create(capture.Respond);
+        using var harness = FakeBridge.Create(request =>
+        {
+            if ((string?)request["method"] == "readObjectXml" && capture.WriteArgs is not null)
+                return new JsonObject
+                {
+                    ["jsonrpc"] = "2.0",
+                    ["id"] = request["id"]?.DeepClone(),
+                    ["result"] = new JsonObject { ["ok"] = true, ["xml"] = (string?)capture.WriteArgs["xml"] },
+                };
+            return capture.Respond(request);
+        });
 
         var result = MethodModifyEngine.ModifyCore(
             new MethodModifyEngine.ModifyRequest("class", "FmVehicleService", "run", "// replaced", "FleetCustom"),
