@@ -78,7 +78,7 @@ public sealed class MethodModifyEngineTests : IDisposable
             var method = (string?)request["method"];
             if (method == "readObjectXml")
             {
-                return Response(request, new JsonObject { ["ok"] = true, ["xml"] = ClassXmlWithMethod });
+                return Response(request, new JsonObject { ["ok"] = true, ["xml"] = capturedUpdateArgs is null ? ClassXmlWithMethod : (string?)capturedUpdateArgs["xml"] });
             }
             if (method == "updateObject")
             {
@@ -97,6 +97,96 @@ public sealed class MethodModifyEngineTests : IDisposable
         // The whole method, not just the statements: the signature and braces survive (#231).
         Assert.Equal("\n    real calc()\n    {\n        return 2;\n    }\n",
             WrittenSource(capturedUpdateArgs["xml"]!.GetValue<string>(), "calc"));
+    }
+
+    [Fact]
+    public void Deferred_create_allows_forward_method_reference_without_claiming_validation()
+    {
+        const string xml = "<AxClass><Name>NinjaCustom</Name><SourceCode><Declaration><![CDATA[public class NinjaCustom { }]]></Declaration></SourceCode></AxClass>";
+        const string source = "public static void calculate() { NinjaCustom::futureMethodNotYetAuthored(); }";
+
+        var (result, written, called) = RunModify(xml,
+            new MethodModifyEngine.ModifyRequest("class", "NinjaCustom", "calculate", null,
+                Model: "DEDCoreModel", NewSource: source, Create: true, ValidationMode: "deferred"));
+
+        Assert.True(result.Ok, result.Error?.Message);
+        Assert.True(called);
+        Assert.Equal(source, WrittenSource(written!, "calculate"));
+        var receipt = System.Text.Json.JsonSerializer.Serialize(result.Data);
+        Assert.Contains("\"validationMode\":\"deferred\"", receipt);
+        Assert.Contains("\"validationStatus\":\"NOT_RUN\"", receipt);
+        Assert.Contains("\"indexStatus\":\"STALE_PENDING_SYNC\"", receipt);
+        Assert.DoesNotContain("\"referenceErrors\":0", receipt);
+        Assert.Contains("\"writeStatus\":\"WRITE_VERIFIED\"", receipt);
+    }
+
+    [Fact]
+    public void Strict_create_rejects_unresolved_forward_static_reference()
+    {
+        const string xml = "<AxClass><Name>NinjaCustom</Name><SourceCode><Declaration><![CDATA[public class NinjaCustom { }]]></Declaration></SourceCode></AxClass>";
+        var (result, _, wrote) = RunModify(xml,
+            new MethodModifyEngine.ModifyRequest("class", "NinjaCustom", "calculate", null,
+                Model: "DEDCoreModel", NewSource: "public static void calculate() { NinjaCustom::futureMethodNotYetAuthored(); }", Create: true));
+        Assert.False(result.Ok);
+        Assert.False(wrote);
+        Assert.Equal(D365FoErrorCodes.ValidationFailed, result.Error!.Code);
+    }
+
+    [Fact]
+    public void Invalid_validation_mode_is_rejected_before_bridge()
+    {
+        var result = MethodModifyEngine.CheckInput(
+            new MethodModifyEngine.ModifyRequest("class", "NinjaCustom", "calculate", null,
+                Model: "DEDCoreModel", NewSource: "public static void calculate() {}", Create: true,
+                ValidationMode: "off"));
+        Assert.False(result?.Ok ?? true);
+        Assert.Equal(D365FoErrorCodes.BadInput, result!.Error!.Code);
+    }
+
+    [Fact]
+    public void Deferred_mode_does_not_bypass_wrong_model_or_duplicate_checks()
+    {
+        var (wrong, _, wrongWrite) = RunModify(ClassXmlWithMethod,
+            new MethodModifyEngine.ModifyRequest("class", "CustBalance", "calculate", null,
+                Model: "DEDCoreModel", NewSource: "public static void calculate() {}", Create: true,
+                ValidationMode: "deferred"));
+        Assert.False(wrong.Ok);
+        Assert.False(wrongWrite);
+
+        var (duplicate, _, duplicateWrite) = RunModify(CustomClassXmlWithMethod,
+            new MethodModifyEngine.ModifyRequest("class", "NinjaCustom", "calc", null,
+                Model: "DEDCoreModel", NewSource: "public real calc() { return 2; }", Create: true,
+                ValidationMode: "deferred"));
+        Assert.False(duplicate.Ok);
+        Assert.False(duplicateWrite);
+    }
+
+    [Fact]
+    public void Accepted_bridge_write_with_stale_postimage_is_not_reported_verified()
+    {
+        var writeCalled = false;
+        using var harness = FakeBridge.Create(request =>
+        {
+            var method = (string?)request["method"];
+            if (method == "readObjectXml")
+                return Response(request, new JsonObject { ["ok"] = true, ["xml"] = ClassXmlWithMethod });
+            if (method == "updateObject")
+            {
+                writeCalled = true;
+                return Response(request, new JsonObject { ["ok"] = true });
+            }
+            throw new InvalidOperationException("Unexpected bridge request");
+        });
+
+        var journal = Path.Combine(Path.GetTempPath(), $"methodverify-journal-{Guid.NewGuid():N}.sqlite");
+        var result = MethodModifyEngine.ModifyCore(
+            new MethodModifyEngine.ModifyRequest("class", "CustBalance", "calc", "return 2;", Model: "ApplicationSuite"),
+            _repo, harness.Client, journal);
+
+        Assert.True(writeCalled);
+        Assert.False(result.Ok);
+        Assert.Equal("WRITE_VERIFICATION_FAILED", result.Error!.Code);
+        Assert.Contains("Reconcile", result.Error.Message);
     }
 
     private static readonly string CustomClassXmlWithMethod = ClassXmlWithMethod.Replace("CustBalance", "NinjaCustom", StringComparison.Ordinal);
@@ -264,7 +354,7 @@ public sealed class MethodModifyEngineTests : IDisposable
         {
             var method = (string?)r["method"];
             if (method == "readObjectXml")
-                return Response(r, new JsonObject { ["ok"] = true, ["xml"] = classXml });
+                return Response(r, new JsonObject { ["ok"] = true, ["xml"] = written ?? classXml });
             if (method == "updateObject")
             {
                 writeCalled = true;
