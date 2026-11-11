@@ -300,6 +300,8 @@ public static class IndexAutoRefresh
             if (node is JsonObject obj)
             {
                 obj["indexRefreshed"] = Describe(refreshed);
+                if (allOk && string.Equals((string?)obj["indexStatus"], "STALE_PENDING_SYNC", StringComparison.Ordinal))
+                    obj["indexStatus"] = "SYNCED";
                 data = obj;
             }
         }

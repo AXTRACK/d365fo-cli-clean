@@ -42,8 +42,12 @@ public sealed class ModifyMethodCommand : Command<ModifyMethodCommand.Settings>
         public string? Model { get; init; }
 
         [CommandOption("--grounding-token <TOKEN>")]
-        [System.ComponentModel.Description("Grounding token from `d365fo prepare change`/`prepare create`. Required for the token check when D365FO_GROUNDING_ENFORCE=true; the reference/BP validation gate itself always blocks on error-severity findings.")]
+        [System.ComponentModel.Description("Grounding token from `d365fo prepare change`/`prepare create`. Required for the token check when D365FO_GROUNDING_ENFORCE=true; strict-mode reference/BP errors block independently of token enforcement.")]
         public string? GroundingToken { get; init; }
+
+        [CommandOption("--validation-mode <MODE>")]
+        [System.ComponentModel.Description("strict (default): reject reference/BP errors; deferred: skip offline X++ checks; structural/provenance checks remain enforced.")]
+        public string ValidationMode { get; init; } = "strict";
 
         [CommandOption("--create")]
         [System.ComponentModel.Description("Add a new method to an existing class. Requires --source with one complete method; refuses duplicates.")]
@@ -74,7 +78,8 @@ public sealed class ModifyMethodCommand : Command<ModifyMethodCommand.Settings>
             settings.Model,
             settings.GroundingToken,
             settings.Source,
-            settings.Create);
+            settings.Create,
+            settings.ValidationMode);
 
         var result = MethodModifyEngine.Modify(request, repo);
         return RenderHelpers.Render(kind, result);

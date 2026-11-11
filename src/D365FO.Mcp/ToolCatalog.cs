@@ -62,7 +62,11 @@ public static class ToolCatalog
     /// </summary>
     public static object InvokeWithIndexRefresh(in Descriptor descriptor, ToolHandlers handlers, JsonElement args)
     {
-        using var scope = D365FO.Core.Index.IndexAutoRefresh.BeginScope();
+        var deferRefresh = descriptor.Name == "modify_method"
+            && args.ValueKind == JsonValueKind.Object
+            && args.TryGetProperty("refreshIndex", out var refresh)
+            && refresh.ValueKind == JsonValueKind.False;
+        using var scope = D365FO.Core.Index.IndexAutoRefresh.BeginScope(enabled: !deferRefresh);
         object raw;
         try
         {
@@ -700,18 +704,19 @@ public static class ToolCatalog
             "Replace the body of an EXISTING method on a live class/table/edt/form via D365FO.Bridge " +
             "(Windows VM, requires D365FO_BRIDGE_ENABLED=1). Reads the object through IMetadataProvider, " +
             "structurally replaces one <Method>'s source (never raw XML/CDATA string surgery), runs the same " +
-            "reference/BP validation gate as generate_object and blocks the write on any error-severity finding " +
-            "(unconditionally — not gated by D365FO_GROUNDING_ENFORCE), then writes back through the provider. " +
+            "reference/BP validation gate as generate_object in strict mode and blocks the write on error-severity findings " +
+            "(independent of D365FO_GROUNDING_ENFORCE); deferred mode skips these diagnostics, then writes back through the provider. " +
             "No on-disk fallback: fails BRIDGE_REQUIRED when the bridge is unavailable. Pass exactly one of: " +
             "`body` — statements only, they replace what sits between the method's outer braces and the doc comment, " +
             "attributes and signature are kept (a full declaration is refused); `source` — the whole method, " +
             "signature included, which must declare exactly one method named `method`. Use generate_object to " +
-            "create new objects. Set `create=true` with `kind=class` and one full `source` to add a missing method to an existing custom-model class; duplicate methods and non-custom models are refused.",
+            "create new objects. Set `create=true` with `kind=class` and one full `source` to add a missing method to an existing custom-model class; duplicate methods and non-custom models are refused. " +
+            "`validationMode=strict` (default) blocks reference/BP errors; `deferred` skips diagnostics but retains provenance and structural checks. Use `refreshIndex=false` to defer model index refresh in a shared MCP service, then explicitly sync once after the batch. Compilation is separate.",
             Schema(("kind", "string", true), ("name", "string", true), ("method", "string", true),
                    ("body", "string", false), ("source", "string", false), ("model", "string", false),
-                   ("groundingToken", "string", false), ("create", "boolean", false)),
+                   ("groundingToken", "string", false), ("create", "boolean", false), ("validationMode", "string", false), ("refreshIndex", "boolean", false)),
             (h, p) => h.ModifyMethod(Str(p, "kind"), Str(p, "name"), Str(p, "method"), StrOrNull(p, "body"),
-                        StrOrNull(p, "model"), StrOrNull(p, "groundingToken"), StrOrNull(p, "source"), Bool(p, "create"))),
+                        StrOrNull(p, "model"), StrOrNull(p, "groundingToken"), StrOrNull(p, "source"), Bool(p, "create"), StrOrNull(p, "validationMode") ?? "strict")),
 
         new Descriptor("modify_object", ToolEffect.Destructive,
             "Structured edits to an EXISTING object beyond its method bodies, via D365FO.Bridge (Windows VM, " +

@@ -194,6 +194,27 @@ public class IndexAutoRefreshTests : IDisposable
         Assert.Contains("\"indexRefreshed\":{\"model\":\"TestModel\",\"elapsedMs\":12", json, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void Successful_refresh_marks_pending_method_index_as_synced()
+    {
+        var result = ToolResult<object>.Success(new { indexStatus = "STALE_PENDING_SYNC", writeStatus = "WRITE_ACCEPTED" });
+        var refreshed = IndexAutoRefresh.Attach(result,
+            new[] { new IndexAutoRefresh.ModelRefresh("TestModel", true, 12, false, null) });
+        var json = D365Json.Serialize(refreshed);
+        Assert.Contains("\"indexStatus\":\"SYNCED\"", json);
+        Assert.Contains("\"writeStatus\":\"WRITE_ACCEPTED\"", json);
+    }
+
+    [Fact]
+    public void Failed_refresh_leaves_pending_index_state_and_emits_warning()
+    {
+        var result = ToolResult<object>.Success(new { indexStatus = "STALE_PENDING_SYNC" });
+        var refreshed = IndexAutoRefresh.Attach(result,
+            new[] { new IndexAutoRefresh.ModelRefresh("TestModel", false, 12, false, "offline") });
+        Assert.Contains("\"indexStatus\":\"STALE_PENDING_SYNC\"", D365Json.Serialize(refreshed));
+        Assert.Contains(refreshed.Warnings!, w => w.Contains("index-refresh-failed"));
+    }
+
     private void WriteClass(string name)
         => ScaffoldFileWriter.Write(ClassXml(name), Path.Combine(_classes, name + ".xml"));
 

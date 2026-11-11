@@ -22,7 +22,7 @@ namespace D365FO.Core.Bridge;
 /// <item><description>locate the target <c>&lt;Method&gt;</c> with <see cref="XDocument"/>
 /// element navigation (never raw string/regex surgery on the XML text),</description></item>
 /// <item><description>run <see cref="ReferenceResolver"/> + <see cref="XppValidator"/> over
-/// the replacement body and fail closed on any error-severity violation,</description></item>
+/// the replacement body in strict mode and fail closed on any error-severity violation,</description></item>
 /// <item><description>write the modified document back via the bridge's
 /// <c>updateObject</c>, which itself round-trips through <c>IMetadataProvider</c>.</description></item>
 /// </list>
@@ -57,7 +57,8 @@ public static class MethodModifyEngine
         string? Model = null,
         string? GroundingToken = null,
         string? NewSource = null,
-        bool Create = false);
+        bool Create = false,
+        string ValidationMode = "strict");
 
     /// <summary>
     /// Build <see cref="BridgeOptions"/> from the unified config resolver (env vars or
@@ -312,6 +313,42 @@ public static class MethodModifyEngine
             return ToolResult<object>.Fail(code, $"Bridge could not update {kind} '{request.ObjectName}': {msg}");
         }
 
+        // Bridge acceptance is not proof that the intended method was persisted.
+        // Re-read through IMetadataProvider; an ambiguous result must not be retried blindly.
+        JsonObject? postWrite;
+        try
+        {
+            postWrite = client.SendAsync("readObjectXml", new JsonObject { ["kind"] = kind, ["name"] = request.ObjectName })
+                .GetAwaiter().GetResult();
+        }
+        catch (BridgeException ex)
+        {
+            return ToolResult<object>.Fail("WRITE_VERIFICATION_FAILED",
+                $"Bridge accepted the write but read-back failed for {request.ObjectName}::{request.MethodName}: {ex.Message}. Reconcile the live object before retrying.");
+        }
+
+        if ((bool?)postWrite?["ok"] != true || string.IsNullOrWhiteSpace((string?)postWrite?["xml"]))
+            return ToolResult<object>.Fail("WRITE_VERIFICATION_FAILED",
+                $"Bridge accepted the write but did not return a readable post-image for {request.ObjectName}::{request.MethodName}. Reconcile the live object before retrying.");
+
+        try
+        {
+            var postDoc = XDocument.Parse((string)postWrite!["xml"]!);
+            var postSource = LocateMethodsContainer(postDoc.Root)?.Elements()
+                .FirstOrDefault(e => e.Name.LocalName == "Method"
+                    && string.Equals(Local(e, "Name"), request.MethodName, StringComparison.OrdinalIgnoreCase));
+            var actualSource = postSource is null ? null : Local(postSource, "Source");
+            if (!string.Equals(actualSource?.Replace("\r\n", "\n", StringComparison.Ordinal),
+                    newSource.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal))
+                return ToolResult<object>.Fail("WRITE_VERIFICATION_FAILED",
+                    $"Bridge accepted the write but the post-image of {request.ObjectName}::{request.MethodName} does not match the requested source. Reconcile before retrying.");
+        }
+        catch (Exception ex)
+        {
+            return ToolResult<object>.Fail("WRITE_VERIFICATION_FAILED",
+                $"Bridge accepted the write but its post-image could not be checked for {request.ObjectName}::{request.MethodName}: {ex.Message}. Reconcile before retrying.");
+        }
+
         // Incremental refresh: the touched model's index rows are now stale. No
         // single-object refresh primitive exists yet (index refresh is model-scoped),
         // so — mirroring the existing form-method commands (GenerateFormMethodCommands) —
@@ -326,6 +363,10 @@ public static class MethodModifyEngine
             model,
             source = "bridge",
             mode = request.Create ? "create" : hasBody ? "body" : "source",
+            validationMode = request.ValidationMode.ToLowerInvariant(),
+            validationStatus = string.Equals(request.ValidationMode, "deferred", StringComparison.OrdinalIgnoreCase) ? "NOT_RUN" : "SEE_GROUNDING",
+            indexStatus = "STALE_PENDING_SYNC",
+            writeStatus = "WRITE_VERIFIED",
             oldBody,
             newBody = newSource,
             grounding,
@@ -333,19 +374,19 @@ public static class MethodModifyEngine
     }
 
     /// <summary>
-    /// Grounding token (opt-in enforcement, same convention as
-    /// <c>D365FO.Cli.Commands.Generate.GroundingGate</c>) plus an <b>unconditional</b>
-    /// reference/BP validation gate — acceptance criteria for #112 requires the write
-    /// to be blocked on validation failure regardless of D365FO_GROUNDING_ENFORCE,
-    /// since this mutates a live, already-shipped object rather than a scaffold file.
+    /// Grounding token enforcement is independent of offline X++ diagnostics.
+    /// Strict mode blocks reference/BP errors regardless of D365FO_GROUNDING_ENFORCE;
+    /// deferred mode skips those diagnostics entirely but still checks the token.
     /// </summary>
     private static (object Grounding, ToolResult<object>? Failure) CheckGrounding(
         ModifyRequest request, MetadataRepository? repo, List<string> warnings)
     {
         int refErrors = 0, refWarnings = 0, bpErrors = 0, bpWarnings = 0, verified = 0;
+        var validationRan = false;
         var violationDetails = new List<string>();
 
-        if (repo is not null)
+        var deferred = string.Equals(request.ValidationMode, "deferred", StringComparison.OrdinalIgnoreCase);
+        if (repo is not null && !deferred)
         {
             try
             {
@@ -364,13 +405,14 @@ public static class MethodModifyEngine
                     if (v.Severity == "error") bpErrors++; else bpWarnings++;
                     violationDetails.Add($"[{v.Rule}] line {v.Line}: {v.Excerpt} — {v.Fix}");
                 }
+                validationRan = true;
             }
             catch (Exception ex)
             {
                 warnings.Add("validation self-check skipped: " + ex.Message);
             }
         }
-        else
+        else if (!deferred)
         {
             warnings.Add("validation self-check skipped: no index available (run `d365fo index build` + `d365fo index extract`).");
         }
@@ -404,11 +446,12 @@ public static class MethodModifyEngine
             tokenSupplied = !string.IsNullOrWhiteSpace(request.GroundingToken),
             tokenValid,
             tokenReason,
-            verifiedReferences = verified,
-            referenceErrors = refErrors,
-            referenceWarnings = refWarnings,
-            bpErrors,
-            bpWarnings,
+            validationStatus = validationRan ? "RUN" : "NOT_RUN",
+            verifiedReferences = !validationRan ? (int?)null : verified,
+            referenceErrors = !validationRan ? (int?)null : refErrors,
+            referenceWarnings = !validationRan ? (int?)null : refWarnings,
+            bpErrors = !validationRan ? (int?)null : bpErrors,
+            bpWarnings = !validationRan ? (int?)null : bpWarnings,
             violations = violationDetails.Count > 0 ? violationDetails : null,
         };
 
@@ -434,6 +477,9 @@ public static class MethodModifyEngine
     /// </summary>
     internal static ToolResult<object>? CheckInput(ModifyRequest request)
     {
+        if (!string.Equals(request.ValidationMode, "strict", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(request.ValidationMode, "deferred", StringComparison.OrdinalIgnoreCase))
+            return ToolResult<object>.Fail(D365FoErrorCodes.BadInput, "validationMode must be strict or deferred.");
         var hasBody = !string.IsNullOrWhiteSpace(request.NewBody);
         var hasSource = !string.IsNullOrWhiteSpace(request.NewSource);
         if (request.Create && (!string.Equals(request.Kind, "class", StringComparison.OrdinalIgnoreCase) || !hasSource || hasBody))

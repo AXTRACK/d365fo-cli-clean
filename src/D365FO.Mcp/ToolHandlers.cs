@@ -1516,10 +1516,10 @@ public sealed partial class ToolHandlers
     /// </summary>
     public ToolResult<object> ModifyMethod(
         string kind, string name, string method, string? body,
-        string? model = null, string? groundingToken = null, string? source = null, bool create = false)
+        string? model = null, string? groundingToken = null, string? source = null, bool create = false, string validationMode = "strict")
     {
         var request = new D365FO.Core.Bridge.MethodModifyEngine.ModifyRequest(
-            kind, name, method, body, model, groundingToken, source, create);
+            kind, name, method, body, model, groundingToken, source, create, validationMode);
         return D365FO.Core.Bridge.MethodModifyEngine.Modify(request, _repo);
     }
 
